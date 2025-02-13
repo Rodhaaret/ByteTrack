@@ -6,19 +6,21 @@ import copy
 import torch
 import torch.nn.functional as F
 
-from .kalman_filter import KalmanFilter
-from yolox.tracker import matching
+from yolox.tracker.kalman_filter import KalmanFilter
+from . import matching
 from .basetrack import BaseTrack, TrackState
 
 class STrack(BaseTrack):
     shared_kalman = KalmanFilter()
-    def __init__(self, tlwh, score):
+    def __init__(self, tlwh, score, class_id=-1):
 
         # wait activate
         self._tlwh = np.asarray(tlwh, dtype=np.float)
         self.kalman_filter = None
         self.mean, self.covariance = None, None
         self.is_activated = False
+
+        self.class_id =class_id
 
         self.score = score
         self.tracklet_len = 0
@@ -163,13 +165,17 @@ class BYTETracker(object):
         lost_stracks = []
         removed_stracks = []
 
+        # If output_results has 5 columns, we assume no class info is available.
         if output_results.shape[1] == 5:
             scores = output_results[:, 4]
             bboxes = output_results[:, :4]
+            class_ids = None
         else:
             output_results = output_results.cpu().numpy()
-            scores = output_results[:, 4] * output_results[:, 5]
-            bboxes = output_results[:, :4]  # x1y1x2y2
+            scores = output_results[:, 4]
+            bboxes = output_results[:, :4]
+            class_ids = output_results[:, 5].astype(int)
+
         img_h, img_w = img_info[0], img_info[1]
         scale = min(img_size[0] / float(img_h), img_size[1] / float(img_w))
         bboxes /= scale
@@ -182,14 +188,48 @@ class BYTETracker(object):
         dets_second = bboxes[inds_second]
         dets = bboxes[remain_inds]
         scores_keep = scores[remain_inds]
-        scores_second = scores[inds_second]
+        if class_ids is not None:
+            class_ids_keep = class_ids[remain_inds]
+        else:
+            class_ids_keep = None
 
+        scores_second = scores[inds_second]
+        dets_second = bboxes[inds_second]
+        if class_ids is not None:
+            class_ids_second = class_ids[inds_second]
+        else:
+            class_ids_second = None
+
+
+        # Create STrack objects from the first set of detections.
         if len(dets) > 0:
-            '''Detections'''
-            detections = [STrack(STrack.tlbr_to_tlwh(tlbr), s) for
-                          (tlbr, s) in zip(dets, scores_keep)]
+            if class_ids_keep is not None:
+                detections = [
+                    STrack(STrack.tlbr_to_tlwh(tlbr), s, class_id=int(cls))
+                    for (tlbr, s, cls) in zip(dets, scores_keep, class_ids_keep)
+                ]
+            else:
+                detections = [
+                    STrack(STrack.tlbr_to_tlwh(tlbr), s)
+                    for (tlbr, s) in zip(dets, scores_keep)
+                ]
         else:
             detections = []
+
+        # Similarly, for the second association.
+        if len(dets_second) > 0:
+            if class_ids_second is not None:
+                detections_second = [
+                    STrack(STrack.tlbr_to_tlwh(tlbr), s, class_id=int(cls))
+                    for (tlbr, s, cls) in zip(dets_second, scores_second, class_ids_second)
+                ]
+            else:
+                detections_second = [
+                    STrack(STrack.tlbr_to_tlwh(tlbr), s)
+                    for (tlbr, s) in zip(dets_second, scores_second)
+                ]
+        else:
+            detections_second = []
 
         ''' Add newly detected tracklets to tracked_stracks'''
         unconfirmed = []
